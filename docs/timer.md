@@ -1,68 +1,49 @@
-# Таймер выполнения заданий (обновлённая документация)
+# Таймер выполнения заданий
 
 ## Зачем нужен
 
 * фиксирует **реальное время** работы студента над заданием;
-* учитывает паузы: можно сохранять черновик и продолжить позже;
-* определяет, было ли решение слишком быстрым (`needs_manual_check`);
-* отображает накопленное время и знак вопроса только **преподавателю**.
+* суммирует паузы — если студент сохранил черновик и вернулся позже, время не теряется;
+* автоматически помечает «молниеносные» решения флагом `needs_manual_check`;
+* отображает накопленное время и знак вопроса **только преподавателю**.
 
 ---
 
 ## 1. Где хранятся настройки
 
 | Файл | Фрагмент | Что добавлено |
-|------|----------|---------------|
-| `models/task.py` | `min_duration` (`DurationField`) | Минимальное время выполнения (по умолчанию 1 минута) |
-| `models/draft.py` | `time_spent` (`FloatField`) | Накопитель времени черновика |
-| `models/solution.py` | `started_at`, `time_spent`, `needs_manual_check` | Полный тайминг решения |
+|------|----------|--------------|
+| `models/task.py` | `min_duration` (`DurationField`) | Минимально допустимое время решения (по‑умолчанию — 1 минута) |
+| `models/draft.py` | `time_spent` (`FloatField`) | Суммарное время черновиков |
+| `models/solution.py` | `started_at`, `time_spent`, `needs_manual_check` | Дата начала, итоговое время и флаг «быстро» |
 
 ---
 
-## 2. Клиент: инициализация и учёт времени
+## 2. Клиент: запуск и отправка времени
 
-### 2.1 Инициализация (в `editor.html` через `editor2.js`)
-```js
-let start = Date.now();
-let base  = 0;
-
-window.getSessionSeconds = () => Math.floor((Date.now() - start) / 1000);
-window.getElapsedSeconds = () => base + getSessionSeconds();
-window.setBaseTime = sec => { base = sec; start = Date.now(); };
-window.resetTimer  = () => { base += getSessionSeconds(); start = Date.now(); };
+### 2.1 Получение времени перед сохранением (`editor2.js`)
+```javascript
+const elapsed = (typeof window.getSessionSeconds === 'function')
+    ? window.getSessionSeconds()
+    : 0;
 ```
-При повторном открытии `elapsed_seconds` передаётся из Django и вызывает `setBaseTime()`.
+Значение `elapsed` отправляется в черновик и финальное решение. Таймер считается встроенными функциями шаблона, определёнными через `editor.html`.
 
----
-
-### 2.2 Сохранение черновика
-```js
-const elapsed = typeof getSessionSeconds === 'function' ? getSessionSeconds() : 0;
-
-$.ajax({
-  url: '/api/tasks/<id>/draft/',
-  method: 'POST',
-  data: JSON.stringify({ code: content, elapsed }),
-});
+### 2.2 Обнуление таймера после отправки
+```javascript
+window.resetTimer && window.resetTimer();
 ```
-Накапливаются только секунды текущей сессии.
+После успешного сохранения или отправки решение, таймер сбрасывается.
 
 ---
 
-### 2.3 Отправка решения
-Тот же механизм, только `elapsed` передаётся в `create_solution`. После успешной отправки вызывается `resetTimer()`.
-
----
-
-## 3. Сервер: расчёт и логика проверки
+## 3. Сервер: расчёт времени и проверка
 
 ### 3.1 Обработка черновика (`views/draft.py`)
 ```python
 draft.time_spent = F('time_spent') + elapsed
 draft.save(update_fields=['time_spent'])
 ```
-
----
 
 ### 3.2 Финальное решение (`views/base.py`)
 ```python
@@ -72,22 +53,19 @@ min_time = task.min_duration.total_seconds() or 60
 solution.time_spent = total_time
 solution.needs_manual_check = total_time < min_time
 ```
-Если `total_time` меньше порога, выставляется флаг ручной проверки.
 
 ---
 
-## 4. Отображение времени и отметки «?»
+## 4. Отображение времени и «?» преподавателю
 
-### 4.1 В статистике группы (`group_statistics.py`)
+### 4.1 В сервисе статистики (`group_statistics.py`)
 ```python
 cell["execution_time"] = int(solution.time_spent or 0)
 cell["needs_manual_check"] = solution.needs_manual_check
 ```
 
----
-
 ### 4.2 В JS-таблице (`group_course24.js`)
-```js
+```javascript
 if (isTeacher && data.execution_time > 0) {
   td.title += `\nВремя: ${format(data.execution_time)}`;
 }
@@ -96,9 +74,6 @@ if (isTeacher && data.needs_manual_check && !underReview) {
   td.classList.add('s-orange');
 }
 ```
-Знак вопроса скрывается, если решение ещё на проверке.
-
----
 
 ### 4.3 В шаблоне решения (`template.html`)
 ```django
@@ -112,15 +87,15 @@ if (isTeacher && data.needs_manual_check && !underReview) {
 
 ---
 
-## 5. Стилизация (`style29.css`)
+## 5. Стили (`style29.css`)
 ```css
-.s-orange { background-color: #f4863c !important; }
-html.dark-mode body .s-orange { background-color: #9c7d20 !important; }
+.s-orange { background-color:#f4863c !important; }
+html.dark-mode body .s-orange { background-color:#9c7d20 !important; }
 ```
 
 ---
 
-## 6. Фильтр отображения времени (`time_filters.py`)
+## 6. Фильтр форматирования (`time_filters.py`)
 ```python
 @register.filter
 def duration_hm(value):
@@ -128,9 +103,7 @@ def duration_hm(value):
         seconds = int(value)
     except (TypeError, ValueError):
         return "—"
-    minutes = seconds // 60
-    sec = seconds % 60
-    return f"{minutes} мин {sec:02d} сек"
+    return f"{seconds//60} мин {seconds%60:02d} сек"
 ```
 
 ---
